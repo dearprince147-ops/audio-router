@@ -11,9 +11,13 @@ import struct
 import sys
 import threading
 import time
+import warnings
 
 import numpy as np
 import soundcard as sc
+
+# Suppress harmless WASAPI frame drop warnings
+warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel

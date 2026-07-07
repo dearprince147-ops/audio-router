@@ -37,11 +37,10 @@ AUDIO_LOG_PATH = os.path.expanduser("~/.cache/audiorouter/audio.log")
 # ── Volume helpers ──────────────────────────────────────────────────────────
 
 def set_volume(pct):
-    """Set PulseAudio default sink volume (0-100%)."""
-    subprocess.run(
-        ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
-        capture_output=True,
-    )
+    """Set PulseAudio volume (0-100%)."""
+    # Android/Termux PulseAudio usually uses index 0 or 'sles_sink'
+    subprocess.run(["pactl", "set-sink-volume", "0", f"{pct}%"], capture_output=True)
+    subprocess.run(["pactl", "set-sink-volume", "sles_sink", f"{pct}%"], capture_output=True)
 
 
 def update_title(pc_name, volume):
