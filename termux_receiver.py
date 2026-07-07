@@ -46,12 +46,12 @@ def write_cava_config(samplerate, channels):
             f"[color]\n"
             f"gradient = 1\n"
             f"gradient_count = 6\n"
-            f"gradient_color_1 = '#0ff'\n"
-            f"gradient_color_2 = '#06f'\n"
-            f"gradient_color_3 = '#f0f'\n"
-            f"gradient_color_4 = '#f06'\n"
-            f"gradient_color_5 = '#ff0'\n"
-            f"gradient_color_6 = '#0f0'\n"
+            f"gradient_color_1 = '#00ffff'\n"
+            f"gradient_color_2 = '#0066ff'\n"
+            f"gradient_color_3 = '#ff00ff'\n"
+            f"gradient_color_4 = '#ff0066'\n"
+            f"gradient_color_5 = '#ffff00'\n"
+            f"gradient_color_6 = '#00ff00'\n"
             f"\n"
             f"[smoothing]\n"
             f"noise_reduction = 77\n"
@@ -183,7 +183,10 @@ def network_reader(sock, initial_data, player, fifo_ready, stop_event):
                 except OSError:
                     pass
 
-        sock.settimeout(5.0)
+        try:
+            sock.settimeout(5.0)
+        except OSError:
+            return
         while not stop_event.is_set():
             try:
                 data = sock.recv(32768)  # large buffer for smooth audio
