@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 Audio Router - Windows Sender
-Captures system audio via WASAPI loopback and streams it to a phone
-over the local network. Run this in PowerShell.
+Captures system audio via WASAPI loopback (using the `soundcard` library)
+and streams it to a phone over the local network. Run this in PowerShell.
 """
 
 import json
 import socket
 import threading
-import time
 
-import sounddevice as sd
+import numpy as np
+import soundcard as sc
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -21,7 +21,8 @@ console = Console()
 DISCOVERY_PORT = 50000
 TCP_PORT = 5005
 DISCOVERY_MSG = b"AUDIOROUTER_DISCOVER"
-CHUNK_FRAMES = 1024
+SAMPLERATE = 48000
+BLOCKSIZE = 1024
 
 stats_lock = threading.Lock()
 stats = {"status": "starting", "client": None, "sent_mb": 0.0}
@@ -56,53 +57,33 @@ def discovery_loop(stop_event):
     sock.close()
 
 
-def get_wasapi_loopback_device():
-    """Finds the default output device on the WASAPI host API, which we
-    open as an INPUT stream (loopback) to capture whatever is playing."""
-    hostapis = sd.query_hostapis()
-    wasapi = next((api for api in hostapis if "WASAPI" in api["name"]), None)
-    if wasapi is None:
-        raise RuntimeError("Windows WASAPI host API was not found (are you on Windows?)")
-    device_index = wasapi["default_output_device"]
-    if device_index is None or device_index < 0:
-        raise RuntimeError("No default output device found for WASAPI")
-    device_info = sd.query_devices(device_index)
-    samplerate = int(device_info["default_samplerate"])
-    channels = min(int(device_info["max_output_channels"]), 2) or 2
-    return device_index, samplerate, channels
+def get_loopback_mic():
+    """Gets a "microphone" that is actually the default speaker's loopback
+    tap -- this is how `soundcard` captures whatever is currently playing."""
+    speaker = sc.default_speaker()
+    mic = sc.get_microphone(id=str(speaker.id), include_loopback=True)
+    channels = getattr(mic, "channels", 2) or 2
+    return mic, channels
 
 
 def stream_to_client(conn, live):
-    device_index, samplerate, channels = get_wasapi_loopback_device()
+    mic, channels = get_loopback_mic()
 
     # Tell the phone what format to expect before the raw audio starts
-    header = json.dumps({"samplerate": samplerate, "channels": channels, "format": "s16le"}).encode() + b"\n"
+    header = json.dumps({"samplerate": SAMPLERATE, "channels": channels, "format": "s16le"}).encode() + b"\n"
     conn.sendall(header)
 
-    disconnected = threading.Event()
-
-    def callback(indata, frames, time_info, status):
-        try:
-            data = indata.tobytes()
-            conn.sendall(data)
+    with mic.recorder(samplerate=SAMPLERATE, blocksize=BLOCKSIZE) as recorder:
+        while True:
+            data = recorder.record(numframes=BLOCKSIZE)  # float32, shape (frames, channels), range -1..1
+            pcm = (np.clip(data, -1.0, 1.0) * 32767.0).astype(np.int16)
+            payload = pcm.tobytes()
+            try:
+                conn.sendall(payload)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                break
             with stats_lock:
-                stats["sent_mb"] += len(data) / (1024 * 1024)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            disconnected.set()
-            raise sd.CallbackStop
-
-    stream = sd.InputStream(
-        samplerate=samplerate,
-        device=device_index,
-        channels=channels,
-        dtype="int16",
-        blocksize=CHUNK_FRAMES,
-        callback=callback,
-        extra_settings=sd.WasapiSettings(loopback=True),
-    )
-    with stream:
-        while stream.active and not disconnected.is_set():
-            time.sleep(0.2)
+                stats["sent_mb"] += len(payload) / (1024 * 1024)
             live.update(render_status())
 
 
