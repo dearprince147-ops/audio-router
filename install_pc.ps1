@@ -67,12 +67,47 @@ foreach ($r in $rules) {
     }
 }
 
-# --- 4. Download sender script ---
-Write-Step "Downloading latest windows_sender.py..."
-$url = "https://raw.githubusercontent.com/dearprince147-ops/audio-router/main/windows_sender.py"
-Invoke-WebRequest -Uri $url -OutFile "windows_sender.py" -UseBasicParsing
-Write-Ok "Saved windows_sender.py"
+# --- 4. Install sender script to permanent location ---
+Write-Step "Installing Audio Router..."
 
-# --- 5. Launch ---
-Write-Host "`n=== Setup complete! Starting Audio Router... ===`n" -ForegroundColor Green
-python windows_sender.py
+$installDir = "$env:USERPROFILE\.audiorouter"
+if (-Not (Test-Path $installDir)) {
+    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+}
+
+$url = "https://raw.githubusercontent.com/dearprince147-ops/audio-router/main/windows_sender.py"
+Invoke-WebRequest -Uri $url -OutFile "$installDir\windows_sender.py" -UseBasicParsing
+Write-Ok "Saved to $installDir\windows_sender.py"
+
+# --- 5. Create 'start-audio' command ---
+Write-Step "Setting up 'start-audio' command..."
+
+$profileDir = Split-Path $PROFILE -Parent
+if (-Not (Test-Path $profileDir)) {
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+}
+if (-Not (Test-Path $PROFILE)) {
+    New-Item -ItemType File -Path $PROFILE -Force | Out-Null
+}
+
+$functionBlock = @"
+
+# Audio Router - quick-launch command
+function start-audio { python "$installDir\windows_sender.py" }
+"@
+
+if (Select-String -Path $PROFILE -Pattern "start-audio" -Quiet -ErrorAction SilentlyContinue) {
+    Write-Ok "'start-audio' command already in your PowerShell profile."
+} else {
+    Add-Content -Path $PROFILE -Value $functionBlock
+    Write-Ok "Added 'start-audio' command to your PowerShell profile."
+}
+Write-Ok "After this session, just type: start-audio"
+
+# Load it into the current session too
+Invoke-Expression $functionBlock
+
+# --- 6. Launch ---
+Write-Host "`n=== Setup complete! Starting Audio Router... ===" -ForegroundColor Green
+Write-Host "   Press Ctrl+C to stop.`n" -ForegroundColor Yellow
+python "$installDir\windows_sender.py"

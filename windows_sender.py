@@ -128,6 +128,7 @@ def stream_to_client(conn, live):
     conn.sendall(header)
 
     with mic.recorder(samplerate=SAMPLERATE, blocksize=BLOCKSIZE, channels=channels) as recorder:
+        sent_bytes = 0
         while True:
             # float32 array, shape (frames, channels), range -1..1
             data = recorder.record(numframes=BLOCKSIZE)
@@ -137,9 +138,10 @@ def stream_to_client(conn, live):
                 conn.sendall(payload)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 break
-            with stats_lock:
-                stats["sent_mb"] += len(payload) / (1024 * 1024)
-            live.update(render_status())
+            # Update stats without lock -- only the Live auto-refresh reads
+            # these, and a torn read is harmless for a display counter.
+            sent_bytes += len(payload)
+            stats["sent_mb"] = sent_bytes / (1024 * 1024)
 
 
 def main():
@@ -148,20 +150,17 @@ def main():
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Larger send buffer for smoother audio streaming
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
     server.bind(("0.0.0.0", TCP_PORT))
     server.listen(1)
 
     with Live(render_status(), console=console, refresh_per_second=4) as live:
-        with stats_lock:
-            stats["status"] = "[yellow]waiting for phone[/yellow]"
-        live.update(render_status())
+        stats["status"] = "[yellow]waiting for phone[/yellow]"
         try:
             while True:
                 conn, addr = server.accept()
-                # Increase the per-connection send buffer too
-                conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
+                # Low-latency socket: small buffer + no Nagle delay
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 64 * 1024)
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 with stats_lock:
                     stats["status"] = "[green]streaming[/green]"
                     stats["client"] = addr[0]

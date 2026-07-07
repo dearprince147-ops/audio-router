@@ -3,15 +3,23 @@
 Audio Router - Termux Receiver
 Discovers PCs on the local network, connects to the one you pick, plays
 the incoming audio through the phone's speakers, and drives cava full-screen.
+
+Controls (while cava is running):
+    +/=   Volume up (5% steps)
+    -     Volume down (5% steps)
+    q     Quit
 """
 
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
+import termios
 import threading
 import time
+import tty
 
 from rich.console import Console
 from rich.prompt import Prompt
@@ -23,8 +31,26 @@ DISCOVERY_PORT = 50000
 DISCOVERY_MSG = b"AUDIOROUTER_DISCOVER"
 FIFO_PATH = os.path.expanduser("~/.cache/audiorouter/cava.fifo")
 CAVA_CONFIG_PATH = os.path.expanduser("~/.cache/audiorouter/cava_audiorouter.conf")
-FFPLAY_LOG_PATH = os.path.expanduser("~/.cache/audiorouter/ffplay.log")
+AUDIO_LOG_PATH = os.path.expanduser("~/.cache/audiorouter/audio.log")
 
+
+# ── Volume helpers ──────────────────────────────────────────────────────────
+
+def set_volume(pct):
+    """Set PulseAudio default sink volume (0-100%)."""
+    subprocess.run(
+        ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
+        capture_output=True,
+    )
+
+
+def update_title(pc_name, volume):
+    """Update the terminal title bar to show volume (survives cava redraws)."""
+    sys.stdout.write(f"\033]0;Audio Router | {pc_name} | Vol: {volume}%\007")
+    sys.stdout.flush()
+
+
+# ── cava config ─────────────────────────────────────────────────────────────
 
 def write_cava_config(samplerate, channels):
     """Write a dedicated cava config that reads from our FIFO.
@@ -58,6 +84,8 @@ def write_cava_config(samplerate, channels):
         )
 
 
+# ── PulseAudio ──────────────────────────────────────────────────────────────
+
 def ensure_pulseaudio():
     """Native Termux has no direct line to the audio hardware -- PulseAudio
     bridges to Android's OpenSL ES / AAudio sink so ffplay has somewhere to
@@ -79,6 +107,8 @@ def ensure_pulseaudio():
                   "Try manually: pulseaudio --start --load=module-sles-sink[/yellow]")
     return False
 
+
+# ── Network discovery ───────────────────────────────────────────────────────
 
 def scan_for_pcs(timeout=4.0, retries=3):
     """Send multiple UDP broadcast packets to discover PCs on the network.
@@ -135,6 +165,8 @@ def choose_pc(pcs):
     return pcs[int(choice)]
 
 
+# ── TCP header ──────────────────────────────────────────────────────────────
+
 def read_header(sock):
     """Read the JSON header line from the TCP stream using a buffer
     instead of one-byte-at-a-time reads."""
@@ -151,8 +183,10 @@ def read_header(sock):
     return None
 
 
+# ── Audio data pump ─────────────────────────────────────────────────────────
+
 def network_reader(sock, initial_data, player, fifo_ready, stop_event):
-    """Reads audio bytes from the PC and fans them out to ffplay (speakers)
+    """Reads audio bytes from the PC and fans them out to pacat (speakers)
     and to the cava FIFO (visualizer) at the same time."""
     fifo_fd = None
     for attempt in range(50):
@@ -170,12 +204,12 @@ def network_reader(sock, initial_data, player, fifo_ready, stop_event):
                        "visualizer may stay blank[/yellow]")
 
     try:
+        player_fd = player.stdin.fileno()
         # Write any leftover data from the header read
         if initial_data:
             try:
-                player.stdin.write(initial_data)
-                player.stdin.flush()
-            except (BrokenPipeError, OSError):
+                os.write(player_fd, initial_data)
+            except OSError:
                 return
             if fifo_fd is not None:
                 try:
@@ -197,9 +231,8 @@ def network_reader(sock, initial_data, player, fifo_ready, stop_event):
             if not data:
                 break
             try:
-                player.stdin.write(data)
-                player.stdin.flush()
-            except (BrokenPipeError, OSError):
+                os.write(player_fd, data)
+            except OSError:
                 break
             if fifo_fd is not None:
                 try:
@@ -211,6 +244,8 @@ def network_reader(sock, initial_data, player, fifo_ready, stop_event):
             os.close(fifo_fd)
 
 
+# ── Main session ────────────────────────────────────────────────────────────
+
 def receive_and_play(pc):
     os.makedirs(os.path.dirname(FIFO_PATH), exist_ok=True)
     if os.path.exists(FIFO_PATH):
@@ -219,7 +254,9 @@ def receive_and_play(pc):
 
     console.print(f"[cyan]Connecting to {pc['name']} ({pc['ip']})...[/cyan]")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
+    # Low-latency socket: smaller buffer + no Nagle delay
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
         sock.connect((pc["ip"], pc["tcp_port"]))
     except (ConnectionRefusedError, OSError) as e:
@@ -243,21 +280,50 @@ def receive_and_play(pc):
     ensure_pulseaudio()
     time.sleep(0.3)
 
-    env = os.environ.copy()
-    env.setdefault("SDL_AUDIODRIVER", "pulseaudio")
-
-    os.makedirs(os.path.dirname(FFPLAY_LOG_PATH), exist_ok=True)
-    ffplay_log = open(FFPLAY_LOG_PATH, "w")
-    console.print(f"[dim]ffplay log: {FFPLAY_LOG_PATH}[/dim]")
+    os.makedirs(os.path.dirname(AUDIO_LOG_PATH), exist_ok=True)
+    audio_log = open(AUDIO_LOG_PATH, "w")
+    console.print(f"[dim]pacat log: {AUDIO_LOG_PATH}[/dim]")
 
     player = subprocess.Popen(
-        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "warning",
-         "-f", "s16le", "-ar", str(samplerate), "-ac", str(channels), "-"],
+        ["pacat", "--format=s16le", f"--rate={samplerate}", f"--channels={channels}", "--latency-msec=20"],
         stdin=subprocess.PIPE,
-        stdout=ffplay_log,
+        stdout=audio_log,
         stderr=subprocess.STDOUT,
-        env=env,
     )
+
+    # Check if pacat survived startup
+    time.sleep(0.5)
+    if player.poll() is not None:
+        audio_log.close()
+        console.print("[red]pacat exited immediately! Checking log...[/red]")
+        try:
+            with open(AUDIO_LOG_PATH) as f:
+                log_content = f.read().strip()
+            if log_content:
+                console.print(f"[yellow]{log_content}[/yellow]")
+            else:
+                console.print("[yellow]pacat log is empty. PulseAudio may not be working.[/yellow]")
+        except OSError:
+            pass
+        console.print("[yellow]Try: pulseaudio --start --load=module-sles-sink[/yellow]")
+        sock.close()
+        return
+
+    # Start cava -- it opens the FIFO read end.  We give it /dev/null for
+    # stdin so WE can own the real stdin for volume-key handling.
+    cava_proc = None
+    devnull = None
+    try:
+        devnull = open(os.devnull, "r")
+        cava_proc = subprocess.Popen(["cava", "-p", CAVA_CONFIG_PATH], stdin=devnull)
+    except FileNotFoundError:
+        console.print("[yellow]cava not found -- audio will still play through speakers.[/yellow]")
+        if devnull:
+            devnull.close()
+            devnull = None
+
+    # Give cava a moment to open the FIFO read end
+    time.sleep(0.5)
 
     stop_event = threading.Event()
     fifo_ready = threading.Event()
@@ -269,20 +335,52 @@ def receive_and_play(pc):
     reader_thread.start()
     fifo_ready.wait(timeout=5.0)
 
+    # ── Volume-control key loop ────────────────────────────────────────
+    volume = 100
+    set_volume(volume)
+    update_title(pc["name"], volume)
+    console.print("[dim]Controls: +/- volume, q quit[/dim]")
+
+    old_settings = termios.tcgetattr(sys.stdin)
     try:
-        cava_proc = subprocess.Popen(["cava", "-p", CAVA_CONFIG_PATH])
-        cava_proc.wait()  # cava takes over the terminal until you quit (q)
-    except FileNotFoundError:
-        console.print("[yellow]cava not found -- audio is still playing through speakers.[/yellow]")
-        console.print("[yellow]Press Ctrl+C to stop.[/yellow]")
-        try:
-            reader_thread.join()
-        except KeyboardInterrupt:
-            pass
+        tty.setcbreak(sys.stdin.fileno())
+
+        while not stop_event.is_set():
+            # If cava exited on its own, we're done
+            if cava_proc is not None and cava_proc.poll() is not None:
+                break
+            # If no cava, exit when the reader finishes
+            if cava_proc is None and not reader_thread.is_alive():
+                break
+
+            # Wait for a keypress (0.5 s timeout so we can check the flags)
+            if select.select([sys.stdin], [], [], 0.5)[0]:
+                ch = sys.stdin.read(1)
+                if ch in ("+", "="):
+                    volume = min(100, volume + 5)
+                    set_volume(volume)
+                    update_title(pc["name"], volume)
+                elif ch == "-":
+                    volume = max(0, volume - 5)
+                    set_volume(volume)
+                    update_title(pc["name"], volume)
+                elif ch == "q":
+                    break
     except KeyboardInterrupt:
         pass
     finally:
+        # Restore terminal
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        # Reset terminal title
+        sys.stdout.write("\033]0;\007")
+        sys.stdout.flush()
+
         stop_event.set()
+        if cava_proc is not None and cava_proc.poll() is None:
+            cava_proc.terminate()
+            cava_proc.wait()
+        if devnull:
+            devnull.close()
         try:
             sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -295,11 +393,13 @@ def receive_and_play(pc):
         player.terminate()
         reader_thread.join(timeout=2)
         try:
-            ffplay_log.close()
+            audio_log.close()
         except OSError:
             pass
         if os.path.exists(FIFO_PATH):
             os.remove(FIFO_PATH)
+
+    console.print("\n[cyan]Audio Router stopped.[/cyan]")
 
 
 def main():

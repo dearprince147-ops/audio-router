@@ -4,7 +4,7 @@
 
 **Stream your Windows PC's audio to your Android phone over Wi-Fi**
 
-*with real-time [cava](https://github.com/karlstav/cava) visualizer*
+*with real-time [cava](https://github.com/karlstav/cava) visualizer & volume control*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows → Android](https://img.shields.io/badge/Platform-Windows_%E2%86%92_Android-brightgreen)](#)
@@ -22,7 +22,7 @@
 │                      │    TCP stream (raw s16le)      │   (Termux)           │
 │  windows_sender.py   │                                │  termux_receiver.py  │
 │  ┌────────────────┐  │   1. Phone broadcasts UDP      │  ┌────────────────┐  │
-│  │ WASAPI Loopback│  │      discovery on port 50000   │  │ ffplay         │  │
+│  │ WASAPI Loopback│  │      discovery on port 50000   │  │ pacat          │  │
 │  │ (soundcard)    │  │   2. PC replies with TCP port   │  │ (audio output) │  │
 │  └────────────────┘  │   3. Phone connects via TCP     │  ├────────────────┤  │
 │         ▼            │   4. PC sends audio header +    │  │ cava           │  │
@@ -31,13 +31,13 @@
 └──────────────────────┘                                └──────────────────────┘
 ```
 
-**In short:** Everything playing on your PC speakers comes out of your phone's speaker instead, with a gorgeous audio visualizer.
+**In short:** Everything playing on your PC speakers comes out of your phone's speaker instead, with a gorgeous audio visualizer and volume control.
 
 ---
 
 ## Quick Start
 
-### 🖥️ On Your Windows PC
+### 🖥️ On Your Windows PC (one-time setup)
 
 Open **PowerShell as Administrator** and run:
 
@@ -49,7 +49,13 @@ This will:
 - ✅ Install Python (if missing)
 - ✅ Install dependencies (`soundcard`, `numpy`, `rich`)
 - ✅ Open firewall ports (TCP 5005, UDP 50000)
-- ✅ Download and launch the audio sender
+- ✅ Add `start-audio` command to PowerShell
+- ✅ Launch the audio sender
+
+**Next time, just open PowerShell and type:**
+```powershell
+start-audio
+```
 
 ### 📱 On Your Android Phone (Termux)
 
@@ -60,7 +66,7 @@ curl -sL https://raw.githubusercontent.com/dearprince147-ops/audio-router/main/i
 ```
 
 This will:
-- ✅ Install all packages (`python`, `ffmpeg`, `cava`, `pulseaudio`)
+- ✅ Install all packages (`python`, `cava`, `pulseaudio`)
 - ✅ Install Python dependencies (`rich`)
 - ✅ Download the receiver script
 - ✅ Create an `audiorouter` command for easy launching
@@ -69,6 +75,26 @@ This will:
 ```bash
 audiorouter
 ```
+
+---
+
+## Controls
+
+### Phone (Termux)
+
+| Key | Action |
+|-----|--------|
+| `+` or `=` | Volume up (5% steps) |
+| `-` | Volume down (5% steps) |
+| `q` | Quit |
+
+Volume is shown in the terminal title bar.
+
+### PC (PowerShell)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Stop the sender |
 
 ---
 
@@ -107,7 +133,7 @@ python windows_sender.py
 
 ```bash
 # Install packages
-pkg install python ffmpeg cava pulseaudio
+pkg install python cava pulseaudio
 pip install rich
 
 # Run
@@ -122,9 +148,11 @@ python termux_receiver.py
 2. **Start the receiver** on your phone — it will auto-discover the PC
 3. **Play any audio** on your PC — it streams to your phone
 4. **cava** launches automatically with a colorful visualizer
-5. Press **q** in cava or **Ctrl+C** to stop
+5. Use **+/-** to control volume, **q** to quit
 
 If auto-discovery doesn't find your PC, the receiver will ask you to enter your PC's IP address manually.
+
+> 💡 **Note:** Audio still plays on your PC too — WASAPI loopback captures a *copy* of the audio. Both devices will output sound.
 
 ---
 
@@ -133,11 +161,12 @@ If auto-discovery doesn't find your PC, the receiver will ask you to enter your 
 | Problem | Solution |
 |---------|----------|
 | **"No PCs found"** | Make sure both devices are on the same Wi-Fi. Check that the Windows firewall rules were created (see Manual Installation). |
-| **Phone connects but no sound** | Run `pulseaudio --start --load=module-sles-sink` manually in Termux. Check `~/.cache/audiorouter/ffplay.log` for errors. |
+| **Phone connects but no sound** | Run `pulseaudio --start --load=module-sles-sink` manually in Termux. Check `~/.cache/audiorouter/audio.log` for errors. |
 | **cava shows nothing** | The audio is still playing — cava just didn't connect to the FIFO. Restart the receiver. |
 | **Choppy / stuttery audio** | Move closer to your Wi-Fi router. Your network may have high latency or packet loss. |
 | **"Connection refused"** | The sender isn't running, or the firewall is blocking port 5005. |
-| **Termux can't install packages** | Run `termux-change-repo` and select a different mirror. |
+| **Termux install fails with mirror error** | Run `termux-change-repo` and select a different mirror, then retry. |
+| **`start-audio` not recognized** | Close and reopen PowerShell. The command is loaded from your profile on startup. |
 
 ---
 
@@ -147,7 +176,8 @@ If auto-discovery doesn't find your PC, the receiver will ask you to enter your 
 2. **Connection**: The phone connects to the PC via TCP on port 5005.
 3. **Header**: The PC sends a JSON header line with the audio format (`{"samplerate": 48000, "channels": 2, "format": "s16le"}`).
 4. **Streaming**: The PC continuously captures system audio via WASAPI loopback, converts it to 16-bit signed PCM, and streams it over TCP.
-5. **Playback**: The phone pipes the raw PCM to `ffplay` for speaker output and to a FIFO that `cava` reads for visualization.
+5. **Playback**: The phone pipes the raw PCM to `pacat` (PulseAudio native player) for speaker output and to a FIFO that `cava` reads for visualization.
+6. **Volume**: The receiver uses `pactl` to control the PulseAudio sink volume in 5% steps.
 
 ---
 
@@ -157,8 +187,8 @@ If auto-discovery doesn't find your PC, the receiver will ask you to enter your 
 audio-router/
 ├── windows_sender.py      # PC-side: captures & streams system audio
 ├── termux_receiver.py     # Phone-side: receives audio, plays & visualizes
-├── install_pc.ps1         # One-command Windows setup
-├── install_termux.sh      # One-command Termux setup
+├── install_pc.ps1         # One-command Windows setup (adds start-audio command)
+├── install_termux.sh      # One-command Termux setup (adds audiorouter command)
 └── README.md
 ```
 

@@ -24,12 +24,18 @@ echo -e "\n${MAGENTA}=== Audio Router - Termux Setup ===${NC}\n"
 
 # --- 1. Update package repos ---
 step "Updating Termux packages..."
-pkg update -y && pkg upgrade -y
-ok "Packages updated."
+if ! pkg update -y 2>&1; then
+    warn "Some repos failed to update (mirror sync issue -- this is normal)."
+    warn "If installs fail below, run: termux-change-repo"
+fi
+if ! pkg upgrade -y 2>&1; then
+    warn "Some packages failed to upgrade. Continuing anyway..."
+fi
+ok "Package update step complete."
 
 # --- 2. Install system dependencies ---
-step "Installing system packages (python, ffmpeg, cava, pulseaudio)..."
-pkg install -y python ffmpeg cava pulseaudio
+step "Installing system packages (python, cava, pulseaudio)..."
+pkg install -y python cava pulseaudio
 ok "System packages installed."
 
 # --- 3. Install Python dependencies ---
