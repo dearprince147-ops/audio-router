@@ -23,6 +23,7 @@ DISCOVERY_PORT = 50000
 DISCOVERY_MSG = b"AUDIOROUTER_DISCOVER"
 FIFO_PATH = os.path.expanduser("~/.cache/audiorouter/cava.fifo")
 CAVA_CONFIG_PATH = os.path.expanduser("~/.config/cava/config")
+FFPLAY_LOG_PATH = os.path.expanduser("~/.cache/audiorouter/ffplay.log")
 
 
 def ensure_cava_config():
@@ -30,6 +31,28 @@ def ensure_cava_config():
     if not os.path.exists(CAVA_CONFIG_PATH):
         with open(CAVA_CONFIG_PATH, "w") as f:
             f.write(f"[input]\nmethod = fifo\nsource = {FIFO_PATH}\n\n[output]\nchannels = stereo\n")
+
+
+def ensure_pulseaudio():
+    """Native Termux has no direct line to the audio hardware -- PulseAudio
+    bridges to Android's OpenSL ES / AAudio sink so ffplay has somewhere to
+    actually send sound. Without this, ffplay opens, finds no device, and
+    exits almost immediately (which is what was happening)."""
+    check = subprocess.run(["pulseaudio", "--check"], capture_output=True)
+    if check.returncode == 0:
+        return True
+    console.print("[cyan]Starting PulseAudio (needed for phone audio output)...[/cyan]")
+    subprocess.Popen(
+        ["pulseaudio", "--start", "--exit-idle-time=-1", "--load=module-sles-sink"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(20):
+        time.sleep(0.3)
+        if subprocess.run(["pulseaudio", "--check"], capture_output=True).returncode == 0:
+            return True
+    console.print("[yellow]Could not confirm PulseAudio started -- audio may not play. "
+                  "Try manually: pulseaudio --start --load=module-sles-sink[/yellow]")
+    return False
 
 
 def scan_for_pcs(timeout=3.0):
@@ -130,10 +153,22 @@ def receive_and_play(pc):
     console.print(f"[green]Stream format: {samplerate} Hz, {channels}ch -- launching cava[/green]")
     time.sleep(0.8)
 
+    ensure_pulseaudio()
+
+    env = os.environ.copy()
+    env.setdefault("SDL_AUDIODRIVER", "pulseaudio")
+
+    os.makedirs(os.path.dirname(FFPLAY_LOG_PATH), exist_ok=True)
+    ffplay_log = open(FFPLAY_LOG_PATH, "w")
+    console.print(f"[dim]ffplay log (check this if there's still no sound): {FFPLAY_LOG_PATH}[/dim]")
+
     player = subprocess.Popen(
-        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "warning",
          "-f", "s16le", "-ar", str(samplerate), "-ac", str(channels), "-"],
         stdin=subprocess.PIPE,
+        stdout=ffplay_log,
+        stderr=subprocess.STDOUT,
+        env=env,
     )
 
     stop_event = threading.Event()
@@ -156,8 +191,16 @@ def receive_and_play(pc):
         except OSError:
             pass
         sock.close()
+        try:
+            player.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
         player.terminate()
         reader_thread.join(timeout=2)
+        try:
+            ffplay_log.close()
+        except OSError:
+            pass
         if os.path.exists(FIFO_PATH):
             os.remove(FIFO_PATH)
 
